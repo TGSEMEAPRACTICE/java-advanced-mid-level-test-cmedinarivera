@@ -21,3 +21,5 @@ Patrón de Diseño (Strategy): Implementa el patrón Strategy para calcular dife
 Clean Code: El código debe ser legible, usar nombres de variables claros y manejar posibles excepciones (ej. montos negativos).
 
 Entrega: Realiza los "commits" y "push" necesarios en este repositorio de GitHub Classroom antes de la hora acordada.
+
+Contributor: Camilo Medina.
