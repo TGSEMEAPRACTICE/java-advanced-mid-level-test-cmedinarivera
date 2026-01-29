@@ -42,7 +42,7 @@ public class RetryExecutor {
             return;
         }
 
-        CompletableFuture.supplyAsync(() -> supplier.get(), executor)
+        CompletableFuture.supplyAsync(supplier, executor)
             .whenComplete((r, ex) -> {
                 if (ex == null) {
                     logger.debug("RetryExecutor: attempt #{} succeeded", attemptNumber);

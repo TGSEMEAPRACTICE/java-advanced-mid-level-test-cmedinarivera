@@ -17,6 +17,7 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 import com.teksystems.pip.midtest.util.RetryExecutor;
+import com.teksystems.pip.midtest.validation.ValidationResult;
 
 @SpringBootApplication
 public class MidTestApplication {
@@ -37,22 +38,18 @@ public class MidTestApplication {
         );
 
         // Executor for async work - choose a bounded pool size between 2 and 8
-        int size = transactions.size();
-        int poolSize = size < 2 ? 2 : Math.min(size, 8);
+        int size = getRuntimeSize(transactions);
+        final int poolSize = Math.min(8, Math.max(2, size));
         ExecutorService executor = Executors.newFixedThreadPool(poolSize);
 
         RetryExecutor retryExecutor = new RetryExecutor(executor);
         try {
-            // 1) Clean input: filter invalid transactions (e.g., null or negative amounts) and collect warnings
+            // 1) Clean input: validate and filter invalid transactions using Transaction.validate()
             List<Transaction> cleaned = transactions.stream()
-                .filter(t -> {
-                    Double amt = t.getAmount();
-                    if (amt == null) {
-                        logger.warn("Skipping transaction with null amount: {}", t);
-                        return false;
-                    }
-                    if (amt < 0) {
-                        logger.warn("Skipping transaction with negative amount: {}", t);
+                .filter(tx -> {
+                    ValidationResult vr = tx.validate();
+                    if (!vr.isValid()) {
+                        logger.warn("Skipping invalid transaction {}: {}", tx.getId(), vr.getMessage());
                         return false;
                     }
                     return true;
@@ -82,25 +79,25 @@ public class MidTestApplication {
                     commission == null ? 0.0 : String.format(Locale.ROOT, "%.2f", commission));
             });
 
-            // 4) Asynchronous validation: simulate external API calls with retries
+            // 4) Asynchronous validation: simulate external API calls with retries that return ValidationResult
 
-            List<CompletableFuture<String>> validations = filtered.stream()
+            List<CompletableFuture<ValidationResult>> validations = filtered.stream()
                 .map(tx -> retryExecutor.retryAsync(() -> validateTransaction(tx), 3, Duration.ofMillis(500)))
                 .toList();
 
             // Combine results non-blocking and handle when all complete
             CompletableFuture<Void> all = CompletableFuture.allOf(validations.toArray(new CompletableFuture[0]));
 
-            CompletableFuture<List<String>> allResults = all.thenApply(v ->
+            CompletableFuture<List<ValidationResult>> allResults = all.thenApply(v ->
                 validations.stream()
                     .map(CompletableFuture::join)
                     .toList()
             );
 
             // Block here to print results for demo; in a real app you might return the future
-            List<String> results = allResults.get();
+            List<ValidationResult> results = allResults.get();
             logger.info("Validation results:");
-            results.forEach(logger::info);
+            results.forEach(r -> logger.info(r.toString()));
 
         } finally {
             // ensure retry executor and thread pools are shutdown cleanly
@@ -110,11 +107,12 @@ public class MidTestApplication {
     }
 
     // Simulate an external validation call that occasionally fails to emulate retry behaviour
-    private static String validateTransaction(Transaction tx) {
-        // Validate presence of amount
+    // Now it returns a ValidationResult; it still throws on transient errors to trigger retries
+    private static ValidationResult validateTransaction(Transaction tx) {
+        // Validate presence of amount (shouldn't happen because we filtered earlier, but keep safe)
         if (tx.getAmount() == null) {
             logger.warn("Transaction {} has null amount", tx.getId());
-            return String.format("%s - INVALID (amount is null)", tx.getId());
+            return ValidationResult.invalid("amount is null");
         }
 
         // Simulate network latency
@@ -124,21 +122,22 @@ public class MidTestApplication {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             logger.error("Validation interrupted for {}", tx.getId(), e);
-            return String.format("%s - validation interrupted", tx.getId());
+            return ValidationResult.invalid("validation interrupted");
         }
 
         // Randomly fail to simulate transient errors
         boolean success = ThreadLocalRandom.current().nextInt(0, 10) < 8; // 80% success
         if (success) {
             logger.debug("Transaction {} validated successfully", tx.getId());
-            return String.format("%s - VALID (currency=%s, amount=%.2f)", tx.getId(), tx.getCurrency(), tx.getAmount());
+            return ValidationResult.valid(String.format("VALID (currency=%s, amount=%.2f)", tx.getCurrency(), tx.getAmount()));
         } else {
             logger.warn("Transient validation error for {}", tx.getId());
             throw new RuntimeException("Transient validation error for " + tx.getId());
         }
     }
 
-    // Transaction model as an immutable nested static class
+    // Transaction model as an immutable nested static class with validation
+    @SuppressWarnings("unused")
     public static final class Transaction {
         private final String id;
 
@@ -158,10 +157,14 @@ public class MidTestApplication {
         public String getId() { return id; }
         public Double getAmount() { return amount; }
         public String getCurrency() { return currency; }
-        public String getStatus() { return status; }
-
         public Transaction withStatus(String newStatus) {
             return new Transaction(this.id, this.amount, this.currency, newStatus);
+        }
+
+        public ValidationResult validate() {
+            if (this.amount == null) return ValidationResult.invalid("amount is null");
+            if (this.amount < 0) return ValidationResult.invalid("amount is negative");
+            return ValidationResult.valid();
         }
 
         @Override
@@ -211,6 +214,11 @@ public class MidTestApplication {
                 default -> new DefaultCommissionStrategy();
             };
         }
+    }
+
+    // Helper to avoid static analysis treating a literal List.of(...) size as a compile-time constant
+    private static int getRuntimeSize(List<?> list) {
+        return list == null ? 0 : list.size();
     }
 
 }
